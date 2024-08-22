@@ -1,0 +1,17 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Launch Debug",
+            "type": "go",
+            "request": "launch",
+            "console": "integratedTerminal",
+            "mode": "debug",
+            "program": "./",
+            "args": ["-i", "\\Device\\NPF_{5B164303-C40F-4CEA-9873-993ABE4018B9}", "-n", "-v", "-number"]
+        }
+    ]
+}
