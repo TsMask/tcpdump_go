@@ -19,6 +19,7 @@ import (
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 	"github.com/gopacket/gopacket/pcap"
+	"github.com/gopacket/gopacket/pcapgo"
 )
 
 // flags contains the flags for tcpdump.
@@ -48,10 +49,11 @@ type flags struct {
 	FilterFile             string
 	TimeStampInNanoSeconds bool
 	IcmpOnly               bool
+	OutputFile             string
 }
 
 const tcpdumpHelp = `       tcpdump [ -ADehnpqtvx# ] [ -icmp ]
-                [ -c count ] [ --count ] [ -F file ][ -i interface ]
+                [ -c count ] [ --count ] [ -F filterFile ] [ -i interface ] [ -w file ]
 			    [ --number ] [ --print ] [ -s snaplen ] [ --nano ] 
 				[ EXPRESSION ]
 	EXPRESSION := [ EXPRESSION ] [ and ] [ or ] [ not ] 
@@ -94,6 +96,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&opts.Quiet, "q", false, "Quiet output. Print less protocol information so output lines are shorter")
 	fs.BoolVar(&opts.Verbose, "v", false, "When parsing and printing, produce (slightly more) verbose output.  For example, the time to live, identification, total length and options in an IP packet are printed.  Also enables additional packet integrity checks such as verifying the IP and ICMP header checksum")
 	fs.BoolVar(&opts.Verbose, "verbose", false, "When parsing and printing, produce (slightly more) verbose output.  For example, the time to live, identification, total length and options in an IP packet are printed.  Also enables additional packet integrity checks such as verifying the IP and ICMP header checksum")
+	fs.StringVar(&opts.OutputFile, "w", "", "Output pcap file such eg 'output.pcap' ")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stdout, "%s\n\n", tcpdumpHelp)
@@ -139,6 +142,18 @@ func parseFlags(args []string) (flags, error) {
 		return flags{}, fmt.Errorf("no device specified")
 	}
 
+	// Verify the specified network interface exists
+	devices, err := pcap.FindAllDevs()
+	if err != nil {
+		return flags{}, err
+	}
+	for _, device := range devices {
+		if device.Name == opts.Device || device.Description == opts.Device || containsIPAddress(device, opts.Device) {
+			opts.Device = device.Name
+			break
+		}
+	}
+
 	return opts, nil
 }
 
@@ -181,7 +196,21 @@ func (cmd *cmd) run() error {
 		return err
 	}
 
-	packetSource := gopacket.NewPacketSource(src, layers.LinkTypeEthernet)
+	// Write a new file
+	var w *pcapgo.Writer
+	if cmd.Opts.OutputFile != "" {
+		f, err := os.Create(cmd.Opts.OutputFile)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+
+		w = pcapgo.NewWriter(f)
+		w.WriteFileHeader(uint32(cmd.Opts.SnapshotLength), src.LinkType()) // new file, must do this.
+	}
+
+	// Capture packets
+	packetSource := gopacket.NewPacketSource(src, src.LinkType())
 	packetSource.NoCopy = true
 
 	fmt.Fprintf(cmd.Out, "tcpdump: verbose output suppressed, use -v for full protocol decode\nlistening on %s, link-type %s, snapshot length %d bytes\n", cmd.Opts.Device, src.LinkType(), cmd.Opts.SnapshotLength)
@@ -201,8 +230,14 @@ func (cmd *cmd) run() error {
 
 			return nil
 		case packet := <-packetSource.PacketsCtx(ctx):
-			networkAnalyzer(capturedPackets, packet) // demo.go
+			if cmd.Opts.OutputFile != "" {
+				w.WritePacket(packet.Metadata().CaptureInfo, packet.Data())
+			}
+
 			capturedPackets++
+
+			networkAnalyzer(capturedPackets, packet) // demo.go
+
 			if cmd.Opts.CountPkg > 0 && capturedPackets >= cmd.Opts.CountPkg {
 				return nil
 			}
@@ -364,6 +399,8 @@ func (cmd *cmd) processPacket(packet gopacket.Packet, num int, lastPkgTimeStamp 
 func main() {
 	// go run . -D
 	// go run . -i "\Device\NPF_{5B164303-C40F-4CEA-9873-993ABE4018B9}" -n -v -number
+	// go run . -i "192.168.5.58" -n -v -number -w output.pcap
+	// go run . -i "192.168.5.58" -n -v -number -F filter.txt -w output.pcap
 	opts, err := parseFlags(os.Args)
 	if err != nil {
 		log.Fatalf("tcpdump: %v", err)
