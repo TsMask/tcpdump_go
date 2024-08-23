@@ -22,5 +22,5 @@ sudo ./tcpdump_go -i eth0 -n -v -number
 - [gopacket](https://pkg.go.dev/github.com/gopacket/gopacket)
 - [go-pcap](https://pkg.go.dev/github.com/packetcap/go-pcap)
 - [net-pack](https://github.com/ashmitsharp/net-pack)
-- [u-root](https://github.com/ashmitsharp/u-root)
+- [u-root](https://github.com/u-root/u-root)
 - [tcpdump_go](https://github.com/ba0gu0/tcpdump_go)
