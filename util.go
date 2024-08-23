@@ -46,6 +46,16 @@ func listDevices() error {
 	return nil
 }
 
+// containsIPAddress returns true if the device has the given IP address.
+func containsIPAddress(device pcap.Interface, ip string) bool {
+	for _, address := range device.Addresses {
+		if address.IP != nil && address.IP.String() == ip {
+			return true
+		}
+	}
+	return false
+}
+
 // parseTimeStamp returns the timestamp in the format specified by the user using the -t, -tt, -ttt, -tttt, -ttttt, -nano flags.
 func (cmd *cmd) parseTimeStamp(currentTimestamp, lastTimeStamp time.Time) string {
 	if cmd.Opts.T {
