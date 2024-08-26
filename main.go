@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"tcpdump_go/demo"
 	"time"
 
 	"github.com/gopacket/gopacket"
@@ -236,7 +237,8 @@ func (cmd *cmd) run() error {
 
 			capturedPackets++
 
-			networkAnalyzer(capturedPackets, packet) // demo.go
+			// Print the packet To Demo package demo.go
+			demo.Demo(packet, capturedPackets, timeStamp)
 
 			if cmd.Opts.CountPkg > 0 && capturedPackets >= cmd.Opts.CountPkg {
 				return nil
