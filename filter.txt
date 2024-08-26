@@ -1,1 +1,1 @@
-tcp and host 192.168.8.58 and port 33030 or 29502
+tcp and host 192.168.5.58 and port 33030 or 33040
