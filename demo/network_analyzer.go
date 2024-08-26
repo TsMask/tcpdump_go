@@ -1,4 +1,4 @@
-package main
+package demo
 
 import (
 	"fmt"
@@ -9,8 +9,9 @@ import (
 	"github.com/gopacket/gopacket/layers"
 )
 
-func networkAnalyzer(capturedPackets int, packet gopacket.Packet) {
-	logFile, err := os.OpenFile("network_analyzer.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+// networkAnalyzer is a function that takes a packet and logs it to a file.
+func networkAnalyzer(packet gopacket.Packet, capturedPackets int) {
+	logFile, err := os.OpenFile("demo/network_analyzer.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		fmt.Printf("Failed to create log file: %v\n", err)
 		os.Exit(1)
@@ -21,7 +22,7 @@ func networkAnalyzer(capturedPackets int, packet gopacket.Packet) {
 	logFile.WriteString(fmt.Sprintf("%d %#v \n", capturedPackets, s))
 }
 
-type PacketModel struct {
+type packetModel struct {
 	TimeStp    time.Time
 	SrcMAC     string
 	DstMAC     string
@@ -35,8 +36,8 @@ type PacketModel struct {
 	PayloadStr string
 }
 
-func parsePacket(packet gopacket.Packet) PacketModel {
-	parsed := PacketModel{
+func parsePacket(packet gopacket.Packet) packetModel {
+	parsed := packetModel{
 		TimeStp: packet.Metadata().Timestamp,
 		Length:  packet.Metadata().Length,
 	}
