@@ -12,6 +12,15 @@
             "mode": "debug",
             "program": "./",
             "args": ["-i", "\\Device\\NPF_{5B164303-C40F-4CEA-9873-993ABE4018B9}", "-n", "-v", "-number"]
+        },
+        {
+            "name": "Launch Read Pcap",
+            "type": "go",
+            "request": "launch",
+            "console": "integratedTerminal",
+            "mode": "debug",
+            "program": "./",
+            "args": ["-r", "output.pcap", "-n", "-v", "-number"]
         }
     ]
 }

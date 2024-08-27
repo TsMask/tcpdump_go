@@ -51,6 +51,7 @@ type flags struct {
 	TimeStampInNanoSeconds bool
 	IcmpOnly               bool
 	OutputFile             string
+	InputFile              string
 }
 
 const tcpdumpHelp = `       tcpdump [ -ADehnpqtvx# ] [ -icmp ]
@@ -98,6 +99,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&opts.Verbose, "v", false, "When parsing and printing, produce (slightly more) verbose output.  For example, the time to live, identification, total length and options in an IP packet are printed.  Also enables additional packet integrity checks such as verifying the IP and ICMP header checksum")
 	fs.BoolVar(&opts.Verbose, "verbose", false, "When parsing and printing, produce (slightly more) verbose output.  For example, the time to live, identification, total length and options in an IP packet are printed.  Also enables additional packet integrity checks such as verifying the IP and ICMP header checksum")
 	fs.StringVar(&opts.OutputFile, "w", "", "Output pcap file such eg 'output.pcap' ")
+	fs.StringVar(&opts.InputFile, "r", "", "Input pcap file such eg 'input.pcap' ")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stdout, "%s\n\n", tcpdumpHelp)
@@ -137,6 +139,10 @@ func parseFlags(args []string) (flags, error) {
 
 	if opts.ListDevices {
 		return flags{}, listDevices()
+	}
+
+	if opts.InputFile != "" {
+		return opts, nil
 	}
 
 	if opts.Device == "" {
@@ -182,14 +188,19 @@ func (cmd *cmd) run() error {
 		cancel()
 	}()
 
-	// Open the device for capturing packets
-	if src, err = pcap.OpenLive(cmd.Opts.Device, int32(cmd.Opts.SnapshotLength), !cmd.Opts.NoPromisc, pcap.BlockForever); err != nil {
-		if strings.Contains(err.Error(), "operation not permitted") {
-			return fmt.Errorf("you don't have permission to capture on that/these device(s)")
+	// Open Offline capturing packets
+	if cmd.Opts.InputFile != "" && cmd.Opts.OutputFile == "" {
+		if src, err = pcap.OpenOffline(cmd.Opts.InputFile); err != nil {
+			return err
 		}
-
-		return err
-
+	} else {
+		// Open the device for capturing packets
+		if src, err = pcap.OpenLive(cmd.Opts.Device, int32(cmd.Opts.SnapshotLength), !cmd.Opts.NoPromisc, pcap.BlockForever); err != nil {
+			if strings.Contains(err.Error(), "operation not permitted") {
+				return fmt.Errorf("you don't have permission to capture on that/these device(s)")
+			}
+			return err
+		}
 	}
 	defer src.Close()
 
@@ -231,6 +242,11 @@ func (cmd *cmd) run() error {
 
 			return nil
 		case packet := <-packetSource.PacketsCtx(ctx):
+			if packet == nil {
+				fmt.Printf("Packet is empty > num %d\n", capturedPackets)
+				continue
+			}
+
 			if cmd.Opts.OutputFile != "" {
 				w.WritePacket(packet.Metadata().CaptureInfo, packet.Data())
 			}
@@ -239,6 +255,10 @@ func (cmd *cmd) run() error {
 
 			// Print the packet To Demo package demo.go
 			demo.Demo(packet, capturedPackets, timeStamp)
+
+			if cmd.Opts.InputFile != "" {
+				continue
+			}
 
 			if cmd.Opts.CountPkg > 0 && capturedPackets >= cmd.Opts.CountPkg {
 				return nil
