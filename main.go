@@ -223,8 +223,9 @@ func (cmd *cmd) run() error {
 
 	// Capture packets
 	packetSource := gopacket.NewPacketSource(src, src.LinkType())
+	packetSource.Lazy = false
 	packetSource.NoCopy = true
-
+	packetSource.DecodeStreamsAsDatagrams = true
 	fmt.Fprintf(cmd.Out, "tcpdump: verbose output suppressed, use -v for full protocol decode\nlistening on %s, link-type %s, snapshot length %d bytes\n", cmd.Opts.Device, src.LinkType(), cmd.Opts.SnapshotLength)
 
 	var (

@@ -43,7 +43,7 @@ func listDevices() error {
 		}
 	}
 
-	return nil
+	return fmt.Errorf("all devices ok")
 }
 
 // containsIPAddress returns true if the device has the given IP address.
