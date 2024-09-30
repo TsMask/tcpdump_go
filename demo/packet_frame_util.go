@@ -3,8 +3,10 @@ package demo
 import (
 	"encoding/binary"
 	"fmt"
+	"net"
 	"strings"
 
+	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 )
 
@@ -178,7 +180,7 @@ func applicationHTTP(data []byte) bool {
 	if len(data) == 0 {
 		return false
 	}
-	prefixStr := string(data[:12])
+	prefixStr := string(data)
 	return strings.HasPrefix(prefixStr, "GET ") || strings.HasPrefix(prefixStr, "POST ") ||
 		strings.HasPrefix(prefixStr, "PUT ") || strings.HasPrefix(prefixStr, "DELETE ") ||
 		strings.HasPrefix(prefixStr, "HEAD ") || strings.HasPrefix(prefixStr, "OPTIONS ") ||
@@ -225,4 +227,120 @@ func applicationHTTPProcess(data string) map[string]map[string]any {
 		}
 	}
 	return p
+}
+
+// colorRuleFB 着色规则-F前景,B背景
+//
+// This file was created by Wireshark. Edit with care.
+func colorRuleFB(packet gopacket.Packet) (int, int) {
+	// Ethernet
+	if ethernetLayer := packet.Layer(layers.LayerTypeEthernet); ethernetLayer != nil {
+		eth := ethernetLayer.(*layers.Ethernet)
+		ethData := eth.Contents
+		// Broadcast 检查第一个字节的最低位
+		// #babdb6, #ffffff
+		if len(ethData) > 0 && (ethData[0]&1) == 1 {
+			return 12238262, 16777215
+		}
+		// Routing CDP (Cisco Discovery Protocol) 检查前三个字节
+		// #12272e, #fff3d6
+		if ethernetLayer.LayerPayload()[0] == 0x01 && ethernetLayer.LayerPayload()[1] == 0x00 && ethernetLayer.LayerPayload()[2] == 0x0c {
+			return 1189678, 16774102
+		}
+		// Routing CARP (Common Address Redundancy Protocol) uses a specific Ethernet type (0x0800)
+		// #12272e, #fff3d6
+		if ethernetLayer.LayerType() == 0x0800 {
+			return 1189678, 16774102
+		}
+	}
+	// ARP
+	if arpLayer := packet.Layer(layers.LayerTypeARP); arpLayer != nil {
+		// #12272e, #faf0d7
+		return 1189678, 16445655
+	}
+	// ICMP
+	if icmpLayer := packet.Layer(layers.LayerTypeICMPv4); icmpLayer != nil {
+		// #12272e, #fce0ff
+		return 1189678, 16572671
+	}
+	if icmpLayer := packet.Layer(layers.LayerTypeICMPv6); icmpLayer != nil {
+		// #12272e, #fce0ff
+		return 1189678, 16572671
+	}
+	// SCTP
+	if sctpLayer := packet.Layer(layers.LayerTypeSCTP); sctpLayer != nil {
+		sctp := sctpLayer.(*layers.SCTP)
+		// SCTP ABORT
+		// #fffc9c, #a40000
+		if sctp.Checksum == 6 {
+			return 16776348, 10747904
+		}
+	}
+	// TCP
+	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+		tcp := tcpLayer.(*layers.TCP)
+		// TCP SYN/FIN
+		// #12272e, #a0a0a0
+		if tcp.SYN && tcp.FIN {
+			return 1189678, 10526880
+		}
+		// TCP RST
+		// #fffc9c, #a40000
+		if tcp.RST {
+			return 16776348, 10747904
+		}
+		// HTTP
+		// #12272e, #e4ffc7
+		if tcp.SrcPort == 80 || tcp.DstPort == 80 || tcp.SrcPort == 443 || tcp.DstPort == 443 {
+			return 1189678, 15007687
+		}
+		// 检查 SMB - 通常基于 TCP 445 或 139
+		// #12272e, #feffd0
+		if tcp.SrcPort == 445 || tcp.DstPort == 445 || tcp.SrcPort == 139 || tcp.DstPort == 139 {
+			return 1189678, 16711632
+		}
+		// Routing BGP usually runs on TCP port 179
+		// #12272e, #fff3d6
+		if tcp.DstPort == 179 || tcp.SrcPort == 179 {
+			return 1189678, 16774102
+		}
+	}
+	// UDP
+	if udpLayer := packet.Layer(layers.LayerTypeUDP); udpLayer != nil {
+		udp := udpLayer.(*layers.UDP)
+		// 检查 SMB NetBIOS 名称服务 (NBNS) - 端口 53
+		// 检查 SMB NetBIOS 数据报服务 (NBDS) - 端口 138
+		if udp.SrcPort == 53 || udp.DstPort == 53 || udp.SrcPort == 138 || udp.DstPort == 138 {
+			return 1189678, 16711632
+		}
+	}
+	// IPv4
+	if ipv4Layer := packet.Layer(layers.LayerTypeIPv4); ipv4Layer != nil {
+		ipv4 := ipv4Layer.(*layers.IPv4)
+		// TCP(6)
+		// #12272e, #e7e6ff
+		if ipv4.Protocol == layers.IPProtocolTCP {
+			return 1189678, 15197951
+		}
+		// UDP(17)
+		// #12272e, #daeeff
+		if ipv4.Protocol == layers.IPProtocolUDP || ipv4.Protocol == layers.IPProtocolUDPLite {
+			return 1189678, 14348031
+		}
+		// Routing EIGRP(0x2f) OSPF(89)
+		// #12272e, #fff3d6
+		if ipv4.Protocol == 0x2f || ipv4.Protocol == layers.IPProtocolOSPF {
+			return 1189678, 16774102
+		}
+		// Routing
+		// GVRP (GARP VLAN Registration Protocol)
+		// GVRP typically utilizes the same multicast address as GARP
+		// HSRP (Hot Standby Router Protocol) uses multicast IP 224.0.0.2
+		// VRRP (Virtual Router Redundancy Protocol) uses multicast IP 224.0.0.18
+		// #12272e, #fff3d6
+		if ipv4.DstIP.Equal(net.IPv4(224, 0, 0, 2)) || ipv4.DstIP.Equal(net.IPv4(224, 0, 0, 100)) {
+			return 1189678, 16774102
+		}
+	}
+	return 16222087, 1189678 // 默认颜色值 #f78787, #12272e
 }

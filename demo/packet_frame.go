@@ -1,37 +1,72 @@
 package demo
 
 import (
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"tcpdump_go/demo/util"
+	"time"
 
 	"github.com/gopacket/gopacket"
 	"github.com/gopacket/gopacket/layers"
 )
 
-type Tree struct {
-	Label         string `json:"label,omitempty"`  // 显示的文本
-	Filter        string `json:"filter,omitempty"` // 过滤条件
-	Tree          []Tree `json:"tree,omitempty"`   // 子节点
-	Start         int    `json:"start,omitempty"`  // 开始位置
-	Length        int    `json:"length,omitempty"` // 长度
-	DataSourceIdx int    `json:"data_source_idx,omitempty"`
-	Severity      string `json:"severity,omitempty"`
-	Type          string `json:"type,omitempty"`
-	Fnum          int    `json:"fnum,omitempty"`
-	URL           string `json:"url,omitempty"`
+// FrameMeta 数据帧元信息
+type FrameMeta struct {
+	Number   int       `json:"number"`
+	Comments bool      `json:"comments"`
+	Ignored  bool      `json:"ignored"`
+	Marked   bool      `json:"marked"`
+	Bg       int       `json:"bg"`      // 背景色 数值转字符串16进制 15007687->e4ffc7
+	Fg       int       `json:"fg"`      // 前景色 文字
+	Columns  [7]string `json:"columns"` // 长度对应字段  ['No.', 'Time', 'Source', 'Destination', 'Protocol', 'Length', 'Info']
+	Frame    Frame     `json:"data"`
 }
 
-func parsePacketFrame(packet gopacket.Packet) {
+// Frame 数据帧信息
+type Frame struct {
+	Number     int                 `json:"number"`
+	Comments   []string            `json:"comments"`
+	DataSource []map[string]string `json:"data_sources"`
+	Tree       []ProtoTree         `json:"tree"`
+	Follow     [][]string          `json:"follow"`
+}
+
+// ProtoTree 数据帧协议树
+type ProtoTree struct {
+	Label         string      `json:"label"`  // 显示的文本
+	Filter        string      `json:"filter"` // 过滤条件
+	Severity      string      `json:"severity"`
+	Type          string      `json:"type"`
+	URL           string      `json:"url"`
+	Fnum          int         `json:"fnum"`
+	Start         int         `json:"start"`  // 开始位置
+	Length        int         `json:"length"` // 长度
+	DataSourceIdx int         `json:"data_source_idx"`
+	Tree          []ProtoTree `json:"tree"` // 子节点
+}
+
+var (
+	frameNumber    = 0        // 帧编号
+	frameTime      = 0.000000 // 时间
+	startTimestamp time.Time  // 开始时间
+)
+
+// parsePacketFrame 解析数据包帧信息
+// frameNumber 帧编号 i++
+// frameTime 时间秒 0.000000
+// frameNumber int, frameTime float64,
+func parsePacketFrame(packet gopacket.Packet) FrameMeta {
 	logFile, err := os.OpenFile("demo/network_parse.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
 		fmt.Printf("Failed to create log file: %v\n", err)
 		os.Exit(1)
 	}
+	log.SetOutput(logFile)
 	defer logFile.Close()
 
-	log.SetOutput(logFile)
 	log.Println(" ##### start")
 	for _, v := range packet.Layers() {
 		log.Println(v.LayerType(), len(v.LayerPayload()))
@@ -41,14 +76,44 @@ func parsePacketFrame(packet gopacket.Packet) {
 	// log.Println("Dump", len(packet.Dump()))
 	// log.Println(packet.Dump())
 	log.Println("  ---  ")
+	frameNumber++
+	currentTimestamp := packet.Metadata().Timestamp
+	if !startTimestamp.IsZero() {
+		// 计算时间差转换为秒
+		frameTime = currentTimestamp.Sub(startTimestamp).Seconds()
+	} else {
+		startTimestamp = currentTimestamp
+	}
+	log.Println("  ---  ")
+
+	frameSrcHost := ""                                         // 源主机IP
+	frameDstHost := ""                                         // 目的主机IP
+	frameProtocol := ""                                        // 协议
+	frameLength := fmt.Sprintf("%d", packet.Metadata().Length) // 长度
+	frameInfo := ""                                            // 信息
+	fg, bg := colorRuleFB(packet)                              // 背景色 数值转字符串16进制 15007687->e4ffc7
+
+	frame := Frame{
+		Number:   frameNumber,
+		Comments: []string{},
+		DataSource: []map[string]string{
+			{
+				"name": fmt.Sprintf("Frame (%d bytes)", packet.Metadata().Length),
+				"data": base64.StdEncoding.EncodeToString(packet.Data()),
+			},
+		},
+		Tree:   []ProtoTree{}, // 各层的数据
+		Follow: [][]string{},  // {"TCP", "tcp.stream eq 0"}
+	}
 
 	// 连接层
 	// fmt.Println(packet.LinkLayer())
-	if ethernetLayer := packet.LinkLayer(); ethernetLayer != nil {
-		log.Println("\n=> LinkLayer", ethernetLayer.LayerType())
+	if linkLayer := packet.LinkLayer(); linkLayer != nil {
+		log.Println("\n=> LinkLayer", linkLayer.LayerType())
 
-		linkTree := linkLayerTree(ethernetLayer)
+		linkTree := linkLayerTree(linkLayer)
 		log.Printf("Tree-> \n%#v\n", linkTree)
+		frame.Tree = append(frame.Tree, linkTree)
 	}
 
 	// 网络层
@@ -58,6 +123,14 @@ func parsePacketFrame(packet gopacket.Packet) {
 
 		networkTree := networkLayerTree(networkLayer)
 		log.Printf("Tree-> \n%#v\n", networkTree)
+		frame.Tree = append(frame.Tree, networkTree)
+
+		src, dst := networkLayer.NetworkFlow().Endpoints()
+		frameSrcHost = src.String()
+		frameDstHost = dst.String()
+		if frameDstHost == "ff:ff:ff:ff" {
+			frameDstHost = "Broadcast"
+		}
 	}
 
 	// 传输层
@@ -65,8 +138,16 @@ func parsePacketFrame(packet gopacket.Packet) {
 	if transportLayer := packet.TransportLayer(); transportLayer != nil {
 		log.Println("\n=> TransportLayer", transportLayer.LayerType())
 
-		transportTree := transportLayerTree(transportLayer)
+		info, transportTree := transportLayerTree(transportLayer)
 		log.Printf("Tree-> \n%#v\n", transportTree)
+		frame.Tree = append(frame.Tree, transportTree)
+
+		frameProtocol = transportLayer.LayerType().String()
+		frameInfo += info
+		frame.Follow = append(frame.Follow, []string{
+			frameProtocol,
+			fmt.Sprintf("%s.stream eq 0", strings.ToLower(frameProtocol)),
+		})
 	}
 
 	// 应用层
@@ -76,6 +157,7 @@ func parsePacketFrame(packet gopacket.Packet) {
 
 		applicationTree := applicationLayerTree(applicationLayer)
 		log.Printf("Tree-> \n%#v\n", applicationTree)
+		frame.Tree = append(frame.Tree, applicationTree)
 	}
 
 	log.Printf("=> Data %d\n", packet.Metadata().Length)
@@ -86,142 +168,194 @@ func parsePacketFrame(packet gopacket.Packet) {
 	// HexDump:
 	log.Printf("\nHexDump\n%s\n", util.HexDump(packet.Data(), "|", "|"))
 
+	frameMeta := FrameMeta{
+		Number:   frameNumber,
+		Comments: false,
+		Ignored:  false,
+		Marked:   false,
+		Bg:       fg, // 数值转字符串16进制 15007687->e4ffc7
+		Fg:       bg,
+		Columns: [7]string{
+			fmt.Sprintf("%d", frameNumber),
+			fmt.Sprintf("%.6f", frameTime), // 格式化为 0.000000
+			frameSrcHost,
+			frameDstHost,
+			frameProtocol,
+			frameLength,
+			frameInfo,
+		},
+		Frame: frame,
+	}
+
 	log.Println(" ##### end \n\n ")
+
+	// 写到新文件观察
+	// frameFile, err := os.OpenFile("demo/network_parse_frame.json", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	// if err != nil {
+	// 	fmt.Printf("Failed to create log file: %v\n", err)
+	// 	os.Exit(1)
+	// }
+	// defer frameFile.Close()
+	// jsonB, _ := json.Marshal(frameMeta)
+	// frameFile.Write(jsonB)
+	// frameFile.Write([]byte("\r\n"))
+	// frameFile.Close()
+	return frameMeta
 }
 
 // linkLayerTree 连接层
-func linkLayerTree(ethernetLayer gopacket.LinkLayer) Tree {
-	src, dst := ethernetLayer.LinkFlow().Endpoints()
-	return Tree{
-		Label:         fmt.Sprintf("%s II, Src: %s, Dst: %s", ethernetLayer.LayerType(), src.String(), dst.String()),
-		Filter:        "eth",
-		Start:         0,
-		Length:        len(ethernetLayer.LayerContents()),
-		DataSourceIdx: 0,
-		Tree: []Tree{
-			{
-				Label:         fmt.Sprintf("Destination: %s", dst.String()),
-				Filter:        fmt.Sprintf("eth.dst == %s", dst.String()),
-				Start:         0,
-				Length:        len(dst.Raw()),
-				DataSourceIdx: 0,
-				Tree: []Tree{
-					{
-						Label:         fmt.Sprintf("Address: %s", dst.String()),
-						Filter:        fmt.Sprintf("eth.addr == %s", dst.String()),
-						Start:         0,
-						Length:        6,
-						DataSourceIdx: 0,
-						Tree:          []Tree{},
-						Severity:      "",
-						Type:          "",
-						Fnum:          926233912,
-						URL:           "",
+func linkLayerTree(linkLayer gopacket.LinkLayer) ProtoTree {
+	var protoTree ProtoTree
+	switch layer := linkLayer.(type) {
+	case *layers.Ethernet: // 最常见的链路层协议，用于局域网（LAN）中。
+		srcMAC := layer.SrcMAC
+		dstMAC := layer.DstMAC
+		ethernetLayerLen := len(layer.Contents)
+		protoTree = ProtoTree{
+			Label:         fmt.Sprintf("%s II, Src: %s, Dst: %s", layer.LayerType(), srcMAC, dstMAC),
+			Filter:        "eth",
+			Start:         0,
+			Length:        ethernetLayerLen,
+			DataSourceIdx: 0,
+			Tree: []ProtoTree{
+				{
+					Label:         fmt.Sprintf("Destination: %s", dstMAC.String()),
+					Filter:        fmt.Sprintf("eth.dst == %s", dstMAC.String()),
+					Start:         0,
+					Length:        ethernetLayerLen,
+					DataSourceIdx: 0,
+					Tree: []ProtoTree{
+						{
+							Label:         fmt.Sprintf("Address: %s", dstMAC.String()),
+							Filter:        fmt.Sprintf("eth.addr == %s", dstMAC.String()),
+							Start:         0,
+							Length:        6,
+							DataSourceIdx: 0,
+							Tree:          []ProtoTree{},
+							Severity:      "",
+							Type:          "",
+							Fnum:          926233912,
+							URL:           "",
+						},
+						{
+							Label:         ".... ..0. .... .... .... .... = LG bit: Globally unique address (factory default)",
+							Filter:        "eth.dst.lg == 0",
+							Start:         0,
+							Length:        3,
+							DataSourceIdx: 0,
+							Tree:          []ProtoTree{},
+							Severity:      "",
+							Type:          "",
+							Fnum:          926233912,
+							URL:           "",
+						},
+						{
+							Label:         ".... ...0 .... .... .... .... = IG bit: Individual address (unicast)",
+							Filter:        "eth.dst.ig == 0",
+							Start:         0,
+							Length:        3,
+							DataSourceIdx: 0,
+							Tree:          []ProtoTree{},
+							Severity:      "",
+							Type:          "",
+							Fnum:          926233912,
+							URL:           "",
+						},
 					},
-					{
-						Label:         ".... ..0. .... .... .... .... = LG bit: Globally unique address (factory default)",
-						Filter:        "eth.dst.lg == 0",
-						Start:         0,
-						Length:        3,
-						DataSourceIdx: 0,
-						Tree:          []Tree{},
-						Severity:      "",
-						Type:          "",
-						Fnum:          926233912,
-						URL:           "",
-					},
-					{
-						Label:         ".... ...0 .... .... .... .... = IG bit: Individual address (unicast)",
-						Filter:        "eth.dst.ig == 0",
-						Start:         0,
-						Length:        3,
-						DataSourceIdx: 0,
-						Tree:          []Tree{},
-						Severity:      "",
-						Type:          "",
-						Fnum:          926233912,
-						URL:           "",
-					},
+					Severity: "",
+					Type:     "",
+					Fnum:     0,
+					URL:      "",
 				},
-				Severity: "",
-				Type:     "",
-				Fnum:     0,
-				URL:      "",
-			},
-			{
-				Label:         fmt.Sprintf("Source: %s", src.String()),
-				Filter:        fmt.Sprintf("eth.src == %s", src.String()),
-				Start:         len(dst.Raw()),
-				Length:        len(src.Raw()),
-				DataSourceIdx: 0,
-				Tree: []Tree{
-					{
-						Label:         fmt.Sprintf("Address: %s", src.String()),
-						Filter:        fmt.Sprintf("eth.addr == %s", src.String()),
-						Start:         len(dst.Raw()),
-						Length:        len(src.Raw()),
-						DataSourceIdx: 0,
-						Tree:          []Tree{},
-						Severity:      "",
-						Type:          "",
-						Fnum:          926233912,
-						URL:           "",
+				{
+					Label:         fmt.Sprintf("Source: %s", srcMAC.String()),
+					Filter:        fmt.Sprintf("eth.src == %s", srcMAC.String()),
+					Start:         ethernetLayerLen,
+					Length:        ethernetLayerLen,
+					DataSourceIdx: 0,
+					Tree: []ProtoTree{
+						{
+							Label:         fmt.Sprintf("Address: %s", srcMAC.String()),
+							Filter:        fmt.Sprintf("eth.addr == %s", dstMAC.String()),
+							Start:         ethernetLayerLen,
+							Length:        ethernetLayerLen,
+							DataSourceIdx: 0,
+							Tree:          []ProtoTree{},
+							Severity:      "",
+							Type:          "",
+							Fnum:          926233912,
+							URL:           "",
+						},
+						{
+							Label:         ".... ..0. .... .... .... .... = LG bit: Globally unique address (factory default)",
+							Filter:        "eth.src.lg == 0",
+							Start:         len(srcMAC),
+							Length:        len(srcMAC) / 2,
+							DataSourceIdx: 0,
+							Tree:          []ProtoTree{},
+							Severity:      "",
+							Type:          "",
+							Fnum:          926233912,
+							URL:           "",
+						},
+						{
+							Label:         ".... ...0 .... .... .... .... = IG bit: Individual address (unicast)",
+							Filter:        "eth.src.ig == 0",
+							Start:         len(srcMAC),
+							Length:        len(srcMAC) / 2,
+							DataSourceIdx: 0,
+							Tree:          []ProtoTree{},
+							Severity:      "",
+							Type:          "",
+							Fnum:          926233912,
+							URL:           "",
+						},
 					},
-					{
-						Label:         ".... ..0. .... .... .... .... = LG bit: Globally unique address (factory default)",
-						Filter:        "eth.src.lg == 0",
-						Start:         len(src.Raw()),
-						Length:        len(src.Raw()) / 2,
-						DataSourceIdx: 0,
-						Tree:          []Tree{},
-						Severity:      "",
-						Type:          "",
-						Fnum:          926233912,
-						URL:           "",
-					},
-					{
-						Label:         ".... ...0 .... .... .... .... = IG bit: Individual address (unicast)",
-						Filter:        "eth.src.ig == 0",
-						Start:         len(src.Raw()),
-						Length:        len(src.Raw()) / 2,
-						DataSourceIdx: 0,
-						Tree:          []Tree{},
-						Severity:      "",
-						Type:          "",
-						Fnum:          926233912,
-						URL:           "",
-					},
+					Severity: "",
+					Type:     "",
+					Fnum:     0,
+					URL:      "",
 				},
-				Severity: "",
-				Type:     "",
-				Fnum:     0,
-				URL:      "",
+				{
+					Label:         "Type: IPv4 (0x0800)",
+					Filter:        "eth.type == 0x0800",
+					Start:         len(dstMAC) + len(srcMAC),
+					Length:        len(layer.LayerContents()) - (len(dstMAC) + len(srcMAC)),
+					DataSourceIdx: 0,
+					Tree:          []ProtoTree{},
+					Severity:      "",
+					Type:          "",
+					Fnum:          0,
+					URL:           "",
+				},
 			},
-			{
-				Label:         "Type: IPv4 (0x0800)",
-				Filter:        "eth.type == 0x0800",
-				Start:         len(dst.Raw()) + len(src.Raw()),
-				Length:        len(ethernetLayer.LayerContents()) - (len(dst.Raw()) + len(src.Raw())),
-				DataSourceIdx: 0,
-				Tree:          []Tree{},
-				Severity:      "",
-				Type:          "",
-				Fnum:          0,
-				URL:           "",
-			},
-		},
-		Severity: "",
-		Type:     "proto",
-		Fnum:     1052,
-		URL:      "",
+			Severity: "",
+			Type:     "proto",
+			Fnum:     1052,
+			URL:      "",
+		}
+	case *layers.PPP: // 点对点协议，通常用于拨号连接。
+		protoTree = ProtoTree{
+			Label:         fmt.Sprintf("%s  ", layer.LayerType()),
+			Filter:        "ppp",
+			Start:         0,
+			Length:        len(layer.LayerContents()),
+			DataSourceIdx: 0,
+			Tree:          []ProtoTree{},
+			Severity:      "",
+			Type:          "proto",
+			Fnum:          1052,
+			URL:           "",
+		}
 	}
+	return protoTree
 }
 
 // networkLayerTree 网络层
-func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
-	var tree Tree
+func networkLayerTree(networkLayer gopacket.NetworkLayer) ProtoTree {
+	var protoTree ProtoTree
 	switch layer := networkLayer.(type) {
-	case *layers.IPv4:
+	case *layers.IPv4: // 第四版因特网协议，广泛使用。
 		// 偏移量取连接层的长度Length
 		linkLayerLen := 14
 		networkLayerLen := len(layer.Contents)
@@ -247,20 +381,20 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 		proto := layer.Protocol
 		checksum := layer.Checksum
 
-		tree = Tree{
+		protoTree = ProtoTree{
 			Label:         fmt.Sprintf("Internet Protocol Version %d, Src: %s, Dst: %s", version, srcIP, dstIP),
 			Filter:        "ip",
 			Start:         linkLayerLen,
 			Length:        networkLayerLen,
 			DataSourceIdx: 0,
-			Tree: []Tree{
+			Tree: []ProtoTree{
 				{
 					Label:         fmt.Sprintf("%04b .... = Version: %d", version, version),
 					Filter:        fmt.Sprintf("ip.version == %d", version),
 					Start:         linkLayerLen,
 					Length:        1,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -272,7 +406,7 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 					Start:         linkLayerLen,
 					Length:        1,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -284,14 +418,14 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 					Start:         linkLayerLen + 1,
 					Length:        1,
 					DataSourceIdx: 0,
-					Tree: []Tree{
+					Tree: []ProtoTree{
 						{
 							Label:         fmt.Sprintf("0000 00.. = Differentiated Services Codepoint: %s (%d)", dscp, tos),
 							Filter:        fmt.Sprintf("ip.dsfield.dscp == %d", tos>>2),
 							Start:         linkLayerLen + 1,
 							Length:        1,
 							DataSourceIdx: 0,
-							Tree:          []Tree{},
+							Tree:          []ProtoTree{},
 							Severity:      "",
 							Type:          "",
 							Fnum:          926233912,
@@ -303,7 +437,7 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 							Start:         linkLayerLen + 1,
 							Length:        1,
 							DataSourceIdx: 0,
-							Tree:          []Tree{},
+							Tree:          []ProtoTree{},
 							Severity:      "",
 							Type:          "",
 							Fnum:          926233912,
@@ -321,7 +455,7 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 					Start:         linkLayerLen + 2,
 					Length:        2,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -333,7 +467,7 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 					Start:         linkLayerLen + 4,
 					Length:        2,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -345,14 +479,14 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 					Start:         linkLayerLen + 6,
 					Length:        1,
 					DataSourceIdx: 0,
-					Tree: []Tree{
+					Tree: []ProtoTree{
 						{
 							Label:         fmt.Sprintf("0... .... = Reserved bit: %s", rbDesc),
 							Filter:        fmt.Sprintf("ip.flags.rb == %d", rb),
 							Start:         linkLayerLen + 6,
 							Length:        1,
 							DataSourceIdx: 0,
-							Tree:          []Tree{},
+							Tree:          []ProtoTree{},
 							Severity:      "",
 							Type:          "",
 							Fnum:          926233912,
@@ -364,7 +498,7 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 							Start:         linkLayerLen + 6,
 							Length:        1,
 							DataSourceIdx: 0,
-							Tree:          []Tree{},
+							Tree:          []ProtoTree{},
 							Severity:      "",
 							Type:          "",
 							Fnum:          926233912,
@@ -376,7 +510,7 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 							Start:         linkLayerLen + 6,
 							Length:        1,
 							DataSourceIdx: 0,
-							Tree:          []Tree{},
+							Tree:          []ProtoTree{},
 							Severity:      "",
 							Type:          "",
 							Fnum:          926233912,
@@ -394,7 +528,7 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 					Start:         linkLayerLen + 6,
 					Length:        2,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -406,7 +540,7 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 					Start:         linkLayerLen + 8,
 					Length:        1,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -418,7 +552,7 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 					Start:         linkLayerLen + 9,
 					Length:        1,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -430,7 +564,7 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 					Start:         linkLayerLen + 10,
 					Length:        2,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -442,7 +576,7 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 					Start:         0,
 					Length:        0,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -454,7 +588,7 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 					Start:         linkLayerLen + 12,
 					Length:        4,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -466,7 +600,7 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 					Start:         linkLayerLen + 16,
 					Length:        4,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -478,7 +612,9 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 			Fnum:     1052,
 			URL:      "",
 		}
-	case *layers.IPv6:
+
+		log.Printf("-> (tos 0x%x, ttl %d, id %d, offset %d, flags [%s], proto %s (%d), length %d)\n", tos, ttl, identification, fragOffset, flags, proto, proto, len(layer.Contents)+len(layer.Payload))
+	case *layers.IPv6: // 第六版因特网协议，逐渐取代 IPv4。
 		log.Printf("-> (flowlabel 0x%x, hlim %d, next-header %s (%d), payload length: %d)\n", layer.FlowLabel, layer.HopLimit, layer.NextHeader, layer.NextHeader, len(layer.Payload))
 
 		log.Println("Version:", layer.Version)
@@ -495,14 +631,15 @@ func networkLayerTree(networkLayer gopacket.NetworkLayer) Tree {
 		log.Println("HopByHop:", layer.HopByHop)
 		log.Println("TrafficClass:", layer.TrafficClass)
 	}
-	return tree
+	return protoTree
 }
 
 // transportLayerTree 传输层
-func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
-	var tree Tree
+func transportLayerTree(transportLayer gopacket.TransportLayer) (string, ProtoTree) {
+	var info string
+	var tree ProtoTree
 	switch layer := transportLayer.(type) {
-	case *layers.TCP:
+	case *layers.TCP: // 传输控制协议，提供可靠的数据传输。
 		// 偏移量取连接层加网络层的长度Length
 		linkLayerAndNetworkLayerLen := 14 + 20
 		transportLayerLen := len(layer.Contents)
@@ -522,20 +659,20 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 		optionsLen, optionsDesc := transportOptions(layer.Options)
 		payloadStr := bytesToHexString(layer.Payload)
 
-		tree = Tree{
+		tree = ProtoTree{
 			Label:         fmt.Sprintf("Transmission Control Protocol, Src Port: %s, Dst Port: %s, Seq: %d, Ack: %d, Len: %d", srcPort, dstPort, seq, ack, payloadrLen),
 			Filter:        "tcp",
 			Start:         linkLayerAndNetworkLayerLen,
 			Length:        transportLayerLen,
 			DataSourceIdx: 0,
-			Tree: []Tree{
+			Tree: []ProtoTree{
 				{
 					Label:         fmt.Sprintf("Source Port: %s", srcPort),
 					Filter:        fmt.Sprintf("tcp.srcport == %d", srcPort),
 					Start:         linkLayerAndNetworkLayerLen,
 					Length:        2,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -547,7 +684,7 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 					Start:         linkLayerAndNetworkLayerLen + 2,
 					Length:        2,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -559,7 +696,7 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 					Start:         linkLayerAndNetworkLayerLen + 12,
 					Length:        1,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -571,7 +708,7 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 					Start:         linkLayerAndNetworkLayerLen + 4,
 					Length:        4,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -583,7 +720,7 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 					Start:         linkLayerAndNetworkLayerLen + 8,
 					Length:        4,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -595,7 +732,7 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 					Start:         linkLayerAndNetworkLayerLen + 12,
 					Length:        1,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -607,14 +744,14 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 					Start:         linkLayerAndNetworkLayerLen + 12,
 					Length:        2,
 					DataSourceIdx: 0,
-					Tree: []Tree{
+					Tree: []ProtoTree{
 						{
 							Label:         fmt.Sprintf(".... ...%d .... = Acknowledgment: %s", flagsACK, flagsACKDesc),
 							Filter:        fmt.Sprintf("tcp.flags.ack == %d", flagsACK),
 							Start:         linkLayerAndNetworkLayerLen + 13,
 							Length:        1,
 							DataSourceIdx: 0,
-							Tree:          []Tree{},
+							Tree:          []ProtoTree{},
 							Severity:      "",
 							Type:          "",
 							Fnum:          926233912,
@@ -626,7 +763,7 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 							Start:         linkLayerAndNetworkLayerLen + 13,
 							Length:        1,
 							DataSourceIdx: 0,
-							Tree:          []Tree{},
+							Tree:          []ProtoTree{},
 							Severity:      "",
 							Type:          "",
 							Fnum:          926233912,
@@ -644,7 +781,7 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 					Start:         linkLayerAndNetworkLayerLen + 14,
 					Length:        2,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -656,7 +793,7 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 					Start:         linkLayerAndNetworkLayerLen + 14,
 					Length:        2,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -668,7 +805,7 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 					Start:         linkLayerAndNetworkLayerLen + 16,
 					Length:        2,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -680,7 +817,7 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 					Start:         0,
 					Length:        0,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -692,7 +829,7 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 					Start:         linkLayerAndNetworkLayerLen + 18,
 					Length:        2,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -704,7 +841,7 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 					Start:         linkLayerAndNetworkLayerLen + 20,
 					Length:        int(optionsLen),
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -716,7 +853,7 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 					Start:         linkLayerAndNetworkLayerLen + 32,
 					Length:        payloadrLen,
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "",
 					Fnum:          0,
@@ -728,18 +865,22 @@ func transportLayerTree(transportLayer gopacket.TransportLayer) Tree {
 			Fnum:     1052,
 			URL:      "",
 		}
-	case *layers.UDP:
+
+		info = fmt.Sprintf("%v - %v [%s], Seq=%d Ack=%d Win=%d Len=1%d ", srcPort, dstPort, flagsDesc, seq, ack, window, payloadrLen)
+		log.Printf("-> TCP, %s", info)
+	case *layers.UDP: // 用户数据报协议，提供无连接的快速数据传输。
 		log.Printf("-> UDP, length %d", len(layer.Payload))
 	case *layers.UDPLite:
 		log.Printf("-> UDPLite, length %d", len(layer.Payload))
+	case *layers.SCTP: // 流控制传输协议，支持多流和多宿主机。
+		log.Printf("-> SCTP, length %d", len(layer.Payload))
 	}
-
-	return tree
+	return info, tree
 }
 
 // applicationLayerTree 应用层
-func applicationLayerTree(applicationLayer gopacket.ApplicationLayer) Tree {
-	var tree Tree
+func applicationLayerTree(applicationLayer gopacket.ApplicationLayer) ProtoTree {
+	var protoTree ProtoTree
 	switch layer := applicationLayer.(type) {
 	case *layers.DNS:
 		log.Printf("-> DNS,  %s", util.DnsData(layer))
@@ -753,13 +894,13 @@ func applicationLayerTree(applicationLayer gopacket.ApplicationLayer) Tree {
 			linkLayerAndNetworkLayerAndTransportLayerLen := 14 + 20 + 32
 			length := len(layer.LayerContents())
 
-			tree = Tree{
+			protoTree = ProtoTree{
 				Label:         "Hypertext Transfer Protocol",
 				Filter:        "http",
 				Start:         linkLayerAndNetworkLayerAndTransportLayerLen,
 				Length:        length,
 				DataSourceIdx: 0,
-				Tree:          []Tree{},
+				Tree:          []ProtoTree{},
 				Severity:      "",
 				Type:          "Chat",
 				Fnum:          1052,
@@ -768,13 +909,13 @@ func applicationLayerTree(applicationLayer gopacket.ApplicationLayer) Tree {
 
 			result := applicationHTTPProcess(string(layer.LayerContents()))
 			for _, v := range result {
-				tree.Tree = append(tree.Tree, Tree{
+				protoTree.Tree = append(protoTree.Tree, ProtoTree{
 					Label:         v["label"].(string),
 					Filter:        fmt.Sprintf("http.%s == %s", v["key"].(string), v["value"].(string)),
 					Start:         linkLayerAndNetworkLayerAndTransportLayerLen + v["length"].(int),
 					Length:        v["length"].(int),
 					DataSourceIdx: 0,
-					Tree:          []Tree{},
+					Tree:          []ProtoTree{},
 					Severity:      "",
 					Type:          "Chat",
 					Fnum:          1052,
@@ -784,5 +925,5 @@ func applicationLayerTree(applicationLayer gopacket.ApplicationLayer) Tree {
 
 		}
 	}
-	return tree
+	return protoTree
 }
