@@ -7,10 +7,13 @@ import (
 )
 
 func Demo(packet gopacket.Packet, num int, lastPkgTimeStamp time.Time) {
+	if true {
+		networkAnalyzerFile(packet, num)
+	}
 	if false {
 		networkAnalyzer(packet, num)
 	}
-	if true {
+	if false {
 		networkParse(packet)
 	}
 }

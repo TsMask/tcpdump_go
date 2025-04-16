@@ -245,7 +245,7 @@ func (cmd *cmd) run() error {
 		case packet := <-packetSource.PacketsCtx(ctx):
 			if packet == nil {
 				fmt.Printf("Packet is empty > num %d\n", capturedPackets)
-				continue
+				return nil
 			}
 
 			if cmd.Opts.OutputFile != "" {
@@ -424,6 +424,7 @@ func main() {
 	// go run . -i "\Device\NPF_{5B164303-C40F-4CEA-9873-993ABE4018B9}" -n -v -number
 	// go run . -i "192.168.5.58" -n -v -number -w output.pcap
 	// go run . -i "192.168.5.58" -n -v -number -F filter.txt -w output.pcap
+	// go run . -n -v -number -r input.pcap
 	opts, err := parseFlags(os.Args)
 	if err != nil {
 		log.Fatalf("tcpdump: %v", err)
