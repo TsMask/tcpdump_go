@@ -150,6 +150,22 @@ func parseDataToMeta(packet gopacket.Packet) FrameMetaData {
 		} else {
 			frameInfo = fmt.Sprintf("%s %s", sip.Method, sip.RequestURI)
 		}
+	case packet.Layer(layers.LayerTypeDNS) != nil:
+		dns := packet.Layer(layers.LayerTypeDNS).(*layers.DNS)
+		frameProtocol = "DNS"
+		fmt.Printf("%+v \n", dns.Contents)
+		msg := []string{}
+		if len(dns.Questions) > 0 {
+			for _, v := range dns.Questions {
+				msg = append(msg, fmt.Sprintf("%s %s", v.Type, v.Name))
+			}
+		}
+		if len(dns.Answers) > 0 {
+			for _, v := range dns.Answers {
+				msg = append(msg, fmt.Sprintf("%s %s", v.Type, v.Name))
+			}
+		}
+		frameInfo = fmt.Sprintf("%s %s 0x%x %s", dns.ResponseCode.String(), dns.OpCode.String(), dns.ID, strings.Join(msg, " "))
 	case packet.Layer(layers.LayerTypeDHCPv6) != nil:
 		dhcpv6 := packet.Layer(layers.LayerTypeDHCPv6).(*layers.DHCPv6)
 		frameProtocol = "DHCPv6"
